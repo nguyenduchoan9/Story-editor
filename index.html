@@ -403,6 +403,38 @@
       });
     }
 
+    async function uploadSource(blob) {
+      const response = await fetch("/api/source", { method: "POST", body: blob });
+      if (!response.ok) throw new Error(await response.text());
+      return (await response.text()).trim();
+    }
+
+    async function captureStaticLayers(videoNode, above) {
+      const nodes = layer.getChildren();
+      const videoIndex = nodes.indexOf(videoNode);
+      const visibility = nodes.map((node) => node.visible());
+      try {
+        nodes.forEach((node, index) => {
+          node.visible(visibility[index] && node !== transformer &&
+            (above ? index > videoIndex : index < videoIndex));
+        });
+        layer.draw();
+        const canvas = layer.getNativeCanvasElement();
+        return await new Promise((resolve, reject) => {
+          canvas.toBlob((blob) => blob ? resolve(blob) : reject(new Error("Không tạo được lớp ảnh.")), "image/png");
+        });
+      } finally {
+        nodes.forEach((node, index) => node.visible(visibility[index]));
+        layer.draw();
+      }
+    }
+
+    function canFastExport(node) {
+      return node && Math.abs(node.rotation() % 360) < 0.001 &&
+        node.scaleX() > 0 && node.scaleY() > 0 &&
+        node.offsetX() === 0 && node.offsetY() === 0;
+    }
+
     async function exportMp4() {
       const exportBtn = document.getElementById("export");
       const entries = [...videos.values()];
@@ -439,16 +471,37 @@
           entry.video.muted = true;
           entry.video.currentTime = 0;
         });
-        const canvas = layer.getNativeCanvasElement();
-        const recording = recordCanvas(canvas, entries, duration);
-        const sourceUpload = fetch("/api/source", { method: "POST", body: entries[0].file });
-        entries.forEach((entry) => entry.video.play().catch(() => {}));
-        const webm = await recording;
-        setBusy("Đang xuất story.mp4…");
-        const sourceRes = await sourceUpload;
-        if (!sourceRes.ok) throw new Error(await sourceRes.text());
-        const id = (await sourceRes.text()).trim();
-        const renderRes = await fetch(`/api/render?id=${encodeURIComponent(id)}`, { method: "POST", body: webm });
+        let renderRes;
+        const videoNode = videos.size === 1 ? videos.keys().next().value : null;
+        if (canFastExport(videoNode)) {
+          const below = await captureStaticLayers(videoNode, false);
+          const above = await captureStaticLayers(videoNode, true);
+          const [videoId, belowId, aboveId] = await Promise.all([
+            uploadSource(entries[0].file), uploadSource(below), uploadSource(above),
+          ]);
+          const ratio = EXPORT_W / DISPLAY_W;
+          const params = new URLSearchParams({
+            video: videoId,
+            below: belowId,
+            above: aboveId,
+            x: String(Math.round(videoNode.x() * ratio)),
+            y: String(Math.round(videoNode.y() * ratio)),
+            width: String(Math.max(1, Math.round(videoNode.width() * videoNode.scaleX() * ratio))),
+            height: String(Math.max(1, Math.round(videoNode.height() * videoNode.scaleY() * ratio))),
+            duration: String(duration),
+          });
+          setBusy("Đang xuất story.mp4…");
+          renderRes = await fetch(`/api/render-fast?${params}`, { method: "POST" });
+        } else {
+          const canvas = layer.getNativeCanvasElement();
+          const recording = recordCanvas(canvas, entries, duration);
+          const sourceUpload = uploadSource(entries[0].file);
+          entries.forEach((entry) => entry.video.play().catch(() => {}));
+          const webm = await recording;
+          setBusy("Đang xuất story.mp4…");
+          const id = await sourceUpload;
+          renderRes = await fetch(`/api/render?id=${encodeURIComponent(id)}`, { method: "POST", body: webm });
+        }
         if (!renderRes.ok) {
           const message = await renderRes.text();
           throw new Error(message || "Không render được video.");

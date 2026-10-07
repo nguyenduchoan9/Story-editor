@@ -22,7 +22,9 @@ Mở [http://127.0.0.1:4173](http://127.0.0.1:4173).
 
 Dừng server bằng `Ctrl + C`.
 
-Render MP4 dùng FFmpeg đi kèm project, không cần cài FFmpeg trên máy. Thời gian render xấp xỉ thời lượng clip.
+Render MP4 dùng FFmpeg đi kèm project, không cần cài FFmpeg trên máy. Video đơn không xoay được ghép trực tiếp trong FFmpeg; video xoay hoặc nhiều video dùng cách ghi canvas, mất ít nhất thời lượng clip.
+
+Nếu FFmpeg đi kèm bị hệ điều hành chặn, chạy với `FFMPEG_PATH=/đường/dẫn/ffmpeg node server.mjs`.
 # Story-editor
 # Story-editor
 # Story-editor
