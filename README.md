@@ -24,3 +24,4 @@ Dừng server bằng `Ctrl + C`.
 
 Render MP4 dùng FFmpeg đi kèm project, không cần cài FFmpeg trên máy. Thời gian render xấp xỉ thời lượng clip.
 # Story-editor
+# Story-editor
