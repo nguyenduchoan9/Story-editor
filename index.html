@@ -1,0 +1,572 @@
+<!DOCTYPE html>
+<html lang="vi">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Story Editor</title>
+  <script src="https://unpkg.com/konva@9.3.20/konva.min.js"></script>
+  <style>
+    * { box-sizing: border-box; }
+    html, body { height: 100%; }
+    body {
+      margin: 0;
+      display: flex;
+      background: #0c0c0e;
+      color: #f4f4f5;
+      font-family: system-ui, -apple-system, sans-serif;
+    }
+    aside {
+      width: 280px;
+      padding: 20px 16px;
+      display: flex;
+      flex-direction: column;
+      gap: 10px;
+      border-right: 1px solid #232328;
+      background: #141416;
+    }
+    h1 {
+      margin: 0 0 8px;
+      font-size: 18px;
+      font-weight: 650;
+    }
+    button, label.btn {
+      background: #222226;
+      color: #f4f4f5;
+      border: 1px solid #34343a;
+      border-radius: 10px;
+      padding: 11px 12px;
+      cursor: pointer;
+      text-align: left;
+      font-size: 14px;
+    }
+    button:hover, label.btn:hover { background: #2a2a30; }
+    button.primary {
+      background: #e11d48;
+      border-color: #e11d48;
+      font-weight: 650;
+      text-align: center;
+    }
+    button.primary:hover { background: #be123c; }
+    button:disabled { opacity: 0.4; cursor: not-allowed; }
+    input[type="file"] { display: none; }
+    .colors {
+      display: flex;
+      gap: 8px;
+      padding: 2px 0 6px;
+    }
+    .swatch {
+      width: 26px;
+      height: 26px;
+      border-radius: 50%;
+      border: 2px solid #3a3a40;
+      padding: 0;
+    }
+    .swatch.active { outline: 2px solid #fff; outline-offset: 2px; }
+    #hint {
+      margin: 8px 0 0;
+      color: #8b8b93;
+      font-size: 13px;
+      line-height: 1.45;
+    }
+    #stage-wrap {
+      flex: 1;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      background:
+        radial-gradient(circle at 50% 40%, #1a1a20 0%, #0c0c0e 70%);
+    }
+    #phone {
+      padding: 10px;
+      border-radius: 28px;
+      background: #2a2a30;
+      box-shadow: 0 24px 80px rgba(0, 0, 0, 0.45);
+    }
+    #busy {
+      position: fixed;
+      inset: 0;
+      display: none;
+      align-items: center;
+      justify-content: center;
+      padding: 24px;
+      background: rgba(0, 0, 0, 0.72);
+      z-index: 30;
+      text-align: center;
+      font-size: 18px;
+    }
+    #busy.show { display: flex; }
+  </style>
+</head>
+<body>
+  <aside>
+    <h1>Story Editor</h1>
+    <label class="btn">Upload ảnh<input id="img-input" type="file" accept="image/*" /></label>
+    <label class="btn">Upload video<input id="video-input" type="file" accept="video/*" /></label>
+    <button id="add-text" type="button">Thêm chữ</button>
+    <div class="colors" id="colors" aria-label="Màu chữ">
+      <button class="swatch active" type="button" data-color="#ffffff" style="background:#ffffff"></button>
+      <button class="swatch" type="button" data-color="#000000" style="background:#000000"></button>
+      <button class="swatch" type="button" data-color="#facc15" style="background:#facc15"></button>
+      <button class="swatch" type="button" data-color="#fb7185" style="background:#fb7185"></button>
+      <button class="swatch" type="button" data-color="#38bdf8" style="background:#38bdf8"></button>
+    </div>
+    <button id="add-sticker" type="button">Thêm sticker ❤️</button>
+    <button id="delete" type="button" disabled>Xóa layer</button>
+    <button id="export" class="primary" type="button">Export PNG</button>
+    <p id="hint">Kéo để di chuyển. Kéo góc để resize. Kéo tay cầm phía trên để xoay. Double-click chữ để sửa. Delete để xóa layer đang chọn. Có video thì Export MP4 ghép chữ, sticker và ảnh vào clip, rồi tải story.mp4.</p>
+  </aside>
+  <div id="stage-wrap">
+    <div id="phone"><div id="container"></div></div>
+  </div>
+  <div id="busy"></div>
+
+  <script>
+    const DISPLAY_W = 405;
+    const DISPLAY_H = 720;
+    const EXPORT_W = 1080;
+    const EXPORT_H = 1920;
+    const FPS = 30;
+
+    const stage = new Konva.Stage({
+      container: "container",
+      width: DISPLAY_W,
+      height: DISPLAY_H,
+    });
+
+    let exporting = false;
+
+    function fitStage() {
+      if (exporting) return;
+      const maxH = Math.max(320, window.innerHeight - 48);
+      const maxW = Math.max(220, window.innerWidth - 320);
+      const scale = Math.min(maxW / DISPLAY_W, maxH / DISPLAY_H, 1);
+      stage.width(DISPLAY_W * scale);
+      stage.height(DISPLAY_H * scale);
+      stage.scale({ x: scale, y: scale });
+      stage.batchDraw();
+    }
+
+    fitStage();
+    window.addEventListener("resize", fitStage);
+
+    const layer = new Konva.Layer();
+    stage.add(layer);
+
+    const bg = new Konva.Rect({
+      x: 0,
+      y: 0,
+      width: DISPLAY_W,
+      height: DISPLAY_H,
+      fill: "#000000",
+      listening: true,
+    });
+    layer.add(bg);
+
+    const transformer = new Konva.Transformer({
+      rotateEnabled: true,
+      enabledAnchors: ["top-left", "top-right", "bottom-left", "bottom-right"],
+      borderStroke: "#ffffff",
+      anchorFill: "#ffffff",
+      anchorStroke: "#111111",
+      anchorSize: 10,
+      boundBoxFunc: (oldBox, newBox) => {
+        if (newBox.width < 20 || newBox.height < 20) return oldBox;
+        return newBox;
+      },
+    });
+    layer.add(transformer);
+
+    const videos = new Map();
+    const deleteBtn = document.getElementById("delete");
+    let textColor = "#ffffff";
+
+    const redraw = new Konva.Animation(() => {}, layer);
+
+    function selectNode(node) {
+      const isContent = node && node !== bg && node !== transformer && node.getParent() !== transformer;
+      if (!isContent) {
+        transformer.nodes([]);
+        deleteBtn.disabled = true;
+      } else {
+        transformer.nodes([node]);
+        node.moveToTop();
+        transformer.moveToTop();
+        deleteBtn.disabled = false;
+      }
+      layer.batchDraw();
+    }
+
+    function placeCentered(node, naturalW, naturalH) {
+      const maxW = DISPLAY_W * 0.86;
+      const maxH = DISPLAY_H * 0.86;
+      const scale = Math.min(maxW / naturalW, maxH / naturalH, 1);
+      const w = Math.max(20, naturalW * scale);
+      const h = Math.max(20, naturalH * scale);
+      node.setAttrs({
+        width: w,
+        height: h,
+        x: (DISPLAY_W - w) / 2,
+        y: (DISPLAY_H - h) / 2,
+        draggable: true,
+      });
+    }
+
+    function addImage(file) {
+      const url = URL.createObjectURL(file);
+      const image = new Image();
+      image.onload = () => {
+        const node = new Konva.Image({ image, draggable: true, name: "content" });
+        placeCentered(node, image.naturalWidth || image.width, image.naturalHeight || image.height);
+        node.setAttr("objectUrl", url);
+        layer.add(node);
+        selectNode(node);
+      };
+      image.onerror = () => URL.revokeObjectURL(url);
+      image.src = url;
+    }
+
+    function addVideo(file) {
+      const url = URL.createObjectURL(file);
+      const video = document.createElement("video");
+      video.src = url;
+      video.muted = true;
+      video.loop = true;
+      video.playsInline = true;
+      video.preload = "auto";
+      video.style.display = "none";
+      document.body.appendChild(video);
+
+      video.onloadeddata = () => {
+        const node = new Konva.Image({
+          image: video,
+          draggable: true,
+          name: "content",
+        });
+        placeCentered(node, video.videoWidth || 9, video.videoHeight || 16);
+        layer.add(node);
+        videos.set(node, { video, url, file });
+        video.play().catch(() => {});
+        if (!redraw.isRunning()) redraw.start();
+        selectNode(node);
+        updateExportButton();
+      };
+      video.onerror = () => URL.revokeObjectURL(url);
+      video.load();
+    }
+
+    function addText() {
+      const node = new Konva.Text({
+        text: "Nhập chữ",
+        fontSize: 42,
+        fontStyle: "bold",
+        fontFamily: "system-ui, sans-serif",
+        fill: textColor,
+        align: "center",
+        draggable: true,
+        name: "content",
+        x: 28,
+        y: DISPLAY_H / 2 - 28,
+        width: DISPLAY_W - 56,
+      });
+      layer.add(node);
+      selectNode(node);
+    }
+
+    function addSticker() {
+      const node = new Konva.Text({
+        text: "❤️",
+        fontSize: 96,
+        draggable: true,
+        name: "content",
+        x: DISPLAY_W / 2 - 48,
+        y: DISPLAY_H / 2 - 56,
+      });
+      node.setAttr("sticker", true);
+      layer.add(node);
+      selectNode(node);
+    }
+
+    function editText(node) {
+      if (!node || node.className !== "Text" || node.getAttr("sticker")) return;
+      const box = node.getClientRect();
+      const stageBox = stage.container().getBoundingClientRect();
+      const area = document.createElement("textarea");
+      area.value = node.text();
+      Object.assign(area.style, {
+        position: "fixed",
+        left: stageBox.left + box.x + "px",
+        top: stageBox.top + box.y + "px",
+        width: Math.max(80, box.width) + "px",
+        height: Math.max(40, box.height) + "px",
+        fontSize: Math.max(16, node.fontSize() * node.scaleY()) + "px",
+        fontFamily: node.fontFamily(),
+        fontWeight: "700",
+        color: node.fill(),
+        textAlign: "center",
+        background: "rgba(0,0,0,0.35)",
+        border: "1px dashed #fff",
+        borderRadius: "6px",
+        outline: "none",
+        resize: "none",
+        zIndex: 20,
+        padding: "4px",
+      });
+      document.body.appendChild(area);
+      area.addEventListener("mousedown", (event) => event.stopPropagation());
+      area.addEventListener("keydown", (event) => {
+        if (event.key === "Enter" && !event.shiftKey) {
+          event.preventDefault();
+          area.blur();
+        }
+        event.stopPropagation();
+      });
+
+      const close = () => {
+        const next = area.value.trim();
+        node.text(next || "Nhập chữ");
+        area.remove();
+        layer.batchDraw();
+      };
+      setTimeout(() => {
+        area.focus();
+        area.select();
+        area.addEventListener("blur", close);
+      }, 0);
+    }
+
+    function deleteSelected() {
+      const node = transformer.nodes()[0];
+      if (!node) return;
+      const tracked = videos.get(node);
+      if (tracked) {
+        tracked.video.pause();
+        tracked.video.remove();
+        tracked.video.src = "";
+        URL.revokeObjectURL(tracked.url);
+        videos.delete(node);
+      }
+      const objectUrl = node.getAttr("objectUrl");
+      if (objectUrl) URL.revokeObjectURL(objectUrl);
+      node.destroy();
+      selectNode(null);
+      if (videos.size === 0 && redraw.isRunning()) redraw.stop();
+      updateExportButton();
+    }
+
+    function updateExportButton() {
+      document.getElementById("export").textContent = videos.size ? "Export MP4" : "Export PNG";
+    }
+
+    function setBusy(text) {
+      const busy = document.getElementById("busy");
+      busy.textContent = text || "";
+      busy.classList.toggle("show", Boolean(text));
+    }
+
+    function recordCanvas(canvas, entries, duration) {
+      const stream = canvas.captureStream(FPS);
+      const mimeType = MediaRecorder.isTypeSupported("video/webm;codecs=vp8,opus")
+        ? "video/webm;codecs=vp8,opus"
+        : "video/webm";
+      const recorder = new MediaRecorder(stream, {
+        mimeType,
+        videoBitsPerSecond: 8_000_000,
+      });
+      const chunks = [];
+      recorder.ondataavailable = (event) => {
+        if (event.data.size) chunks.push(event.data);
+      };
+      const stopped = new Promise((resolve) => {
+        recorder.onstop = () => resolve(new Blob(chunks, { type: mimeType }));
+      });
+      recorder.start(200);
+      const started = performance.now();
+      const progress = setInterval(() => {
+        const percent = Math.min(99, Math.round(((performance.now() - started) / (duration * 1000)) * 100));
+        setBusy(`Đang ghép chữ và sticker… ${percent}%`);
+      }, 200);
+      return new Promise((resolve, reject) => {
+        const timer = setTimeout(() => {
+          clearInterval(progress);
+          entries.forEach((entry) => entry.video.pause());
+          if (recorder.state !== "inactive") recorder.stop();
+        }, duration * 1000 + 150);
+        stopped.then((blob) => {
+          clearTimeout(timer);
+          clearInterval(progress);
+          resolve(blob);
+        }, (error) => {
+          clearTimeout(timer);
+          clearInterval(progress);
+          reject(error);
+        });
+      });
+    }
+
+    async function exportMp4() {
+      const exportBtn = document.getElementById("export");
+      const entries = [...videos.values()];
+      const duration = Math.max(...entries.map((entry) => entry.video.duration || 0));
+      if (!Number.isFinite(duration) || duration <= 0) {
+        alert("Video chưa sẵn sàng để render.");
+        return;
+      }
+
+      const selected = transformer.nodes();
+      const playback = entries.map((entry) => ({
+        video: entry.video,
+        loop: entry.video.loop,
+        muted: entry.video.muted,
+        time: entry.video.currentTime,
+      }));
+      const previousRatio = Konva.pixelRatio;
+
+      transformer.nodes([]);
+      exporting = true;
+      exportBtn.disabled = true;
+      if (!redraw.isRunning()) redraw.start();
+
+      try {
+        setBusy("Đang chuẩn bị video…");
+        Konva.pixelRatio = 1;
+        stage.width(EXPORT_W);
+        stage.height(EXPORT_H);
+        stage.scale({ x: EXPORT_W / DISPLAY_W, y: EXPORT_W / DISPLAY_W });
+        layer.draw();
+        entries.forEach((entry) => {
+          entry.video.pause();
+          entry.video.loop = false;
+          entry.video.muted = true;
+          entry.video.currentTime = 0;
+        });
+        const canvas = layer.getNativeCanvasElement();
+        const recording = recordCanvas(canvas, entries, duration);
+        const sourceUpload = fetch("/api/source", { method: "POST", body: entries[0].file });
+        entries.forEach((entry) => entry.video.play().catch(() => {}));
+        const webm = await recording;
+        setBusy("Đang xuất story.mp4…");
+        const sourceRes = await sourceUpload;
+        if (!sourceRes.ok) throw new Error(await sourceRes.text());
+        const id = (await sourceRes.text()).trim();
+        const renderRes = await fetch(`/api/render?id=${encodeURIComponent(id)}`, { method: "POST", body: webm });
+        if (!renderRes.ok) {
+          const message = await renderRes.text();
+          throw new Error(message || "Không render được video.");
+        }
+        const blob = await renderRes.blob();
+        const url = URL.createObjectURL(blob);
+        const link = document.createElement("a");
+        link.href = url;
+        link.download = "story.mp4";
+        link.click();
+        setTimeout(() => URL.revokeObjectURL(url), 15000);
+      } catch (error) {
+        const message = error && error.message ? error.message : "Không render được video.";
+        alert(message.includes("Failed to fetch")
+          ? "Không gọi được trình render. Hãy chạy node server.mjs trong thư mục story-editor."
+          : message);
+      } finally {
+        Konva.pixelRatio = previousRatio;
+        exporting = false;
+        playback.forEach((item) => {
+          item.video.loop = item.loop;
+          item.video.muted = item.muted;
+          item.video.currentTime = item.time;
+        });
+        fitStage();
+        entries.forEach((entry) => entry.video.play().catch(() => {}));
+        if (selected[0]) selectNode(selected[0]);
+        exportBtn.disabled = false;
+        setBusy("");
+      }
+    }
+
+    function exportPng() {
+      const selected = transformer.nodes();
+      transformer.nodes([]);
+      layer.draw();
+      const url = stage.toDataURL({
+        pixelRatio: EXPORT_W / stage.width(),
+        mimeType: "image/png",
+      });
+      transformer.nodes(selected);
+      layer.batchDraw();
+      const link = document.createElement("a");
+      link.href = url;
+      link.download = "story.png";
+      link.click();
+    }
+
+    document.getElementById("img-input").addEventListener("change", (event) => {
+      const file = event.target.files && event.target.files[0];
+      if (file) addImage(file);
+      event.target.value = "";
+    });
+
+    document.getElementById("video-input").addEventListener("change", (event) => {
+      const file = event.target.files && event.target.files[0];
+      if (file) addVideo(file);
+      event.target.value = "";
+    });
+
+    document.getElementById("add-text").addEventListener("click", addText);
+    document.getElementById("add-sticker").addEventListener("click", addSticker);
+    deleteBtn.addEventListener("click", deleteSelected);
+    document.getElementById("export").addEventListener("click", () => {
+      if (videos.size) exportMp4();
+      else exportPng();
+    });
+
+    document.getElementById("colors").addEventListener("click", (event) => {
+      const button = event.target.closest(".swatch");
+      if (!button) return;
+      textColor = button.dataset.color;
+      document.querySelectorAll(".swatch").forEach((swatch) => {
+        swatch.classList.toggle("active", swatch === button);
+      });
+      const selected = transformer.nodes()[0];
+      if (selected && selected.className === "Text" && !selected.getAttr("sticker")) {
+        selected.fill(textColor);
+        layer.batchDraw();
+      }
+    });
+
+    function contentNode(target) {
+      let node = target;
+      while (node && node !== stage) {
+        if (node === transformer) return null;
+        if (node.name && node.name() === "content") return node;
+        node = node.getParent();
+      }
+      return null;
+    }
+
+    stage.on("pointerdown", (event) => {
+      if (event.target === stage || event.target === bg) selectNode(null);
+    });
+
+    stage.on("pointerclick", (event) => {
+      const node = contentNode(event.target);
+      if (node) selectNode(node);
+    });
+
+    stage.on("dragstart", (event) => {
+      const node = contentNode(event.target);
+      if (node) selectNode(node);
+    });
+
+    stage.on("pointerdblclick", (event) => {
+      editText(event.target);
+    });
+
+    window.addEventListener("keydown", (event) => {
+      const typing = document.activeElement && document.activeElement.tagName === "TEXTAREA";
+      if (typing) return;
+      if (event.key === "Delete" || event.key === "Backspace") {
+        event.preventDefault();
+        deleteSelected();
+      }
+    });
+  </script>
+</body>
+</html>
