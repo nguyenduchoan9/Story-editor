@@ -40,28 +40,7 @@ function serveStatic(req, res) {
   fs.createReadStream(filePath).pipe(res);
 }
 
-function probeAudio(file) {
-  return new Promise((resolve) => {
-    const probe = spawn(ffmpegPath, ['-hide_banner', '-i', file], { stdio: ['ignore', 'ignore', 'pipe'] });
-    let text = '';
-    probe.stderr.on('data', (chunk) => {
-      text += chunk.toString();
-    });
-    probe.on('error', () => resolve(false));
-    probe.on('close', () => resolve(/Audio:/.test(text)));
-  });
-}
-
-function encodeMp4(webmPath, outPath, audioPath) {
-  const args = ['-y', '-i', webmPath];
-  if (audioPath) args.push('-i', audioPath);
-  args.push('-map', '0:v:0');
-  if (audioPath) args.push('-map', '1:a:0');
-  args.push('-c:v', 'libx264', '-preset', 'veryfast', '-crf', '18', '-pix_fmt', 'yuv420p');
-  if (audioPath) args.push('-c:a', 'aac', '-b:a', '160k', '-shortest');
-  else args.push('-an');
-  args.push('-movflags', '+faststart', outPath);
-
+function runFfmpeg(args) {
   return new Promise((resolve, reject) => {
     const ffmpeg = spawn(ffmpegPath, args, { stdio: ['ignore', 'ignore', 'pipe'] });
     const logs = [];
@@ -74,7 +53,38 @@ function encodeMp4(webmPath, outPath, audioPath) {
   });
 }
 
-function encodeFastMp4(videoPath, belowPath, abovePath, outPath, geometry) {
+// audio, audioStart and audioDuration are all-or-none. The client has already clamped
+// audioDuration to the output length, so this only checks ranges.
+function readAudio(url) {
+  const [id, start, duration] = ['audio', 'audioStart', 'audioDuration'].map((key) => url.searchParams.get(key));
+  if (id === null && start === null && duration === null) return { ok: true, audio: null };
+  const file = sources.get(id || '');
+  const range = { start: Number(start), duration: Number(duration) };
+  if (!id || !start || !duration || !file || !fs.existsSync(file) ||
+      !Number.isFinite(range.start) || !Number.isFinite(range.duration) ||
+      range.start < 0 || range.duration <= 0) {
+    return { ok: false, audio: null };
+  }
+  return { ok: true, audio: { id, path: file, ...range } };
+}
+
+function audioInput(audio) {
+  return ['-ss', String(audio.start), '-t', String(audio.duration), '-i', audio.path];
+}
+
+function encodeMp4(webmPath, outPath, audio) {
+  const args = ['-y', '-i', webmPath];
+  if (audio) args.push(...audioInput(audio));
+  args.push('-map', '0:v:0');
+  if (audio) args.push('-map', '1:a:0');
+  args.push('-c:v', 'libx264', '-preset', 'veryfast', '-crf', '18', '-pix_fmt', 'yuv420p');
+  if (audio) args.push('-c:a', 'aac', '-b:a', '160k');
+  else args.push('-an');
+  args.push('-movflags', '+faststart', outPath);
+  return runFfmpeg(args);
+}
+
+function encodeFastMp4(videoPath, belowPath, abovePath, outPath, geometry, audio) {
   const { x, y, width, height, duration } = geometry;
   const filter = [
     `[0:v]setpts=PTS-STARTPTS,scale=${width}:${height}:flags=lanczos[clip]`,
@@ -86,23 +96,25 @@ function encodeFastMp4(videoPath, belowPath, abovePath, outPath, geometry) {
     '-y', '-i', videoPath,
     '-loop', '1', '-framerate', '30', '-i', belowPath,
     '-loop', '1', '-framerate', '30', '-i', abovePath,
-    '-filter_complex', filter,
-    '-map', '[v]', '-map', '0:a:0?',
-    '-t', String(duration), '-r', '30',
-    '-c:v', 'libx264', '-preset', 'veryfast', '-crf', '18', '-pix_fmt', 'yuv420p',
-    '-c:a', 'aac', '-b:a', '160k', '-movflags', '+faststart', outPath,
   ];
+  if (audio) args.push(...audioInput(audio));
+  args.push('-filter_complex', filter, '-map', '[v]');
+  if (audio) args.push('-map', '3:a:0');
+  args.push('-t', String(duration), '-r', '30', '-c:v', 'libx264', '-preset', 'veryfast', '-crf', '18', '-pix_fmt', 'yuv420p');
+  if (audio) args.push('-c:a', 'aac', '-b:a', '160k');
+  else args.push('-an');
+  args.push('-movflags', '+faststart', outPath);
+  return runFfmpeg(args);
+}
 
-  return new Promise((resolve, reject) => {
-    const ffmpeg = spawn(ffmpegPath, args, { stdio: ['ignore', 'ignore', 'pipe'] });
-    const logs = [];
-    ffmpeg.stderr.on('data', (chunk) => logs.push(chunk.toString()));
-    ffmpeg.on('error', reject);
-    ffmpeg.on('close', (code) => {
-      if (code === 0) resolve();
-      else reject(new Error(logs.join('').slice(-1800) || `ffmpeg exited ${code}`));
-    });
-  });
+function encodeStillMp4(framePath, outPath, duration, audio) {
+  return runFfmpeg([
+    '-y', '-loop', '1', '-framerate', '30', '-i', framePath,
+    ...audioInput(audio),
+    '-map', '0:v:0', '-map', '1:a:0', '-t', String(duration), '-r', '30', '-vf', 'format=yuv420p',
+    '-c:v', 'libx264', '-preset', 'veryfast', '-tune', 'stillimage', '-crf', '18',
+    '-c:a', 'aac', '-b:a', '160k', '-movflags', '+faststart', outPath,
+  ]);
 }
 
 async function handleSource(req, res) {
@@ -114,13 +126,42 @@ async function handleSource(req, res) {
   send(res, 200, id, { 'Content-Type': 'text/plain; charset=utf-8' });
 }
 
+function releaseSources(ids) {
+  ids.forEach((id) => {
+    const file = sources.get(id);
+    if (file) fs.rm(file, { force: true }, () => {});
+    sources.delete(id);
+  });
+}
+
+// FFmpeg names the input it failed to open; report a bad music file in plain words, not as a log dump.
+function renderFailure(error, audio) {
+  if (audio && error.message.includes(`Error opening input file ${audio.path}`)) return 'Không đọc được file nhạc.';
+  return error.message || 'Render thất bại.';
+}
+
+function streamMp4(res, outPath, cleanup) {
+  // The client may have disconnected while FFmpeg was running; 'close' has already fired then.
+  if (res.destroyed) {
+    cleanup();
+    return;
+  }
+  res.writeHead(200, {
+    'Content-Type': 'video/mp4',
+    'Content-Disposition': 'attachment; filename="story.mp4"',
+  });
+  fs.createReadStream(outPath).pipe(res);
+  res.on('close', cleanup);
+}
+
 async function handleFastRender(req, res, url) {
   const ids = ['video', 'below', 'above'].map((key) => url.searchParams.get(key) || '');
   const paths = ids.map((id) => sources.get(id));
   const geometry = Object.fromEntries(['x', 'y', 'width', 'height', 'duration'].map((key) => [
     key, Number(url.searchParams.get(key)),
   ]));
-  if (paths.some((file) => !file || !fs.existsSync(file)) ||
+  const { ok, audio } = readAudio(url);
+  if (!ok || paths.some((file) => !file || !fs.existsSync(file)) ||
       Object.values(geometry).some((value) => !Number.isFinite(value)) ||
       geometry.width <= 0 || geometry.height <= 0 || geometry.duration <= 0) {
     send(res, 400, 'Invalid export inputs');
@@ -130,52 +171,68 @@ async function handleFastRender(req, res, url) {
   const outPath = path.join(os.tmpdir(), `story-out-${crypto.randomBytes(8).toString('hex')}.mp4`);
   const cleanup = () => {
     fs.rm(outPath, { force: true }, () => {});
-    paths.forEach((file) => fs.rm(file, { force: true }, () => {}));
-    ids.forEach((id) => sources.delete(id));
+    releaseSources(audio ? [...ids, audio.id] : ids);
   };
   try {
-    await encodeFastMp4(paths[0], paths[1], paths[2], outPath, geometry);
-    res.writeHead(200, {
-      'Content-Type': 'video/mp4',
-      'Content-Disposition': 'attachment; filename="story.mp4"',
-    });
-    fs.createReadStream(outPath).pipe(res);
-    res.on('close', cleanup);
+    await encodeFastMp4(paths[0], paths[1], paths[2], outPath, geometry, audio);
+    streamMp4(res, outPath, cleanup);
   } catch (error) {
     console.error(error.message);
     cleanup();
-    if (!res.headersSent) send(res, 500, error.message || 'Render thất bại.');
+    if (!res.headersSent) send(res, 500, renderFailure(error, audio));
   }
 }
 
 async function handleRender(req, res, url) {
-  const sourceId = url.searchParams.get('id') || '';
-  const sourcePath = sources.get(sourceId);
+  // Older clients upload the clip as `id` to borrow its audio; that audio is never used now,
+  // but the upload is still released.
+  const legacyId = url.searchParams.get('id') || '';
+  const { ok, audio } = readAudio(url);
+  if (!ok) {
+    send(res, 400, 'Invalid export inputs');
+    return;
+  }
   const renderId = crypto.randomBytes(8).toString('hex');
   const webmPath = path.join(os.tmpdir(), `story-in-${renderId}.webm`);
   const outPath = path.join(os.tmpdir(), `story-out-${renderId}.mp4`);
-  try {
-    await pipeline(req, fs.createWriteStream(webmPath));
-    const audioPath = sourcePath && fs.existsSync(sourcePath) && await probeAudio(sourcePath) ? sourcePath : null;
-    await encodeMp4(webmPath, outPath, audioPath);
-    res.writeHead(200, {
-      'Content-Type': 'video/mp4',
-      'Content-Disposition': 'attachment; filename="story.mp4"',
-    });
-    fs.createReadStream(outPath).pipe(res);
-    res.on('close', () => {
-      fs.rm(outPath, { force: true }, () => {});
-      fs.rm(webmPath, { force: true }, () => {});
-      if (sourcePath) fs.rm(sourcePath, { force: true }, () => {});
-      sources.delete(sourceId);
-    });
-  } catch (error) {
-    console.error(error.message);
+  const cleanup = () => {
     fs.rm(outPath, { force: true }, () => {});
     fs.rm(webmPath, { force: true }, () => {});
-    if (sourcePath) fs.rm(sourcePath, { force: true }, () => {});
-    sources.delete(sourceId);
-    if (!res.headersSent) send(res, 500, error.message || 'Render thất bại.');
+    releaseSources(audio ? [legacyId, audio.id] : [legacyId]);
+  };
+  try {
+    await pipeline(req, fs.createWriteStream(webmPath));
+    await encodeMp4(webmPath, outPath, audio);
+    streamMp4(res, outPath, cleanup);
+  } catch (error) {
+    console.error(error.message);
+    cleanup();
+    if (!res.headersSent) send(res, 500, renderFailure(error, audio));
+  }
+}
+
+async function handleStillRender(req, res, url) {
+  const frameId = url.searchParams.get('frame') || '';
+  const framePath = sources.get(frameId);
+  const duration = Number(url.searchParams.get('duration'));
+  const { ok, audio } = readAudio(url);
+  if (!ok || !audio || !framePath || !fs.existsSync(framePath) || !Number.isFinite(duration) || duration <= 0) {
+    send(res, 400, 'Invalid export inputs');
+    return;
+  }
+
+  const outPath = path.join(os.tmpdir(), `story-out-${crypto.randomBytes(8).toString('hex')}.mp4`);
+  const cleanup = () => {
+    fs.rm(outPath, { force: true }, () => {});
+    releaseSources([frameId, audio.id]);
+  };
+  try {
+    await encodeStillMp4(framePath, outPath, duration, audio);
+    streamMp4(res, outPath, cleanup);
+  } catch (error) {
+    console.error(error.message);
+    cleanup();
+    if (!res.headersSent) send(res, 500, renderFailure(error, audio));
   }
 }
 
@@ -196,6 +253,12 @@ const server = http.createServer((req, res) => {
   }
   if (req.method === 'POST' && url.pathname === '/api/render-fast') {
     handleFastRender(req, res, url).catch((error) => {
+      if (!res.headersSent) send(res, 500, error.message);
+    });
+    return;
+  }
+  if (req.method === 'POST' && url.pathname === '/api/render-still') {
+    handleStillRender(req, res, url).catch((error) => {
       if (!res.headersSent) send(res, 500, error.message);
     });
     return;
