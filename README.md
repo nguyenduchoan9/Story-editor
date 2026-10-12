@@ -2,11 +2,14 @@
 
 Prototype editor story 9:16.
 
-- Upload ảnh
+- Upload ảnh, bố cục Tự do hoặc Chia đôi (tối đa 2 ảnh trên/dưới, mỗi ảnh lấp đầy nửa khung và bị cắt theo nửa đó)
 - Upload video và xem trước trên canvas
-- Thêm chữ, sticker, kéo, resize, xoay, xóa layer
-- Không có video: Export PNG 1080×1920
-- Có video: Export MP4 ghép chữ, sticker và ảnh lên clip, giữ tiếng gốc, tải `story.mp4`
+- Thêm chữ với 5 phông (Roboto, Montserrat, Playfair Display, Pacifico, Oswald, đều có tiếng Việt), sticker ❤️ 😊 😢, kéo, resize, xoay, xóa layer
+- Upload nhạc nền, chọn đoạn bắt đầu/kết thúc và nghe thử
+- Không có video và không có nhạc: Export PNG 1080×1920
+- Có video hoặc có nhạc: Export MP4 ghép chữ, sticker và ảnh lên clip, tải `story.mp4`
+- Tiếng gốc của video không được giữ: MP4 chỉ có nhạc đã chọn (không chọn nhạc thì không có tiếng)
+- Có video: MP4 dài bằng video, nhạc bị cắt ở cuối video, nhạc ngắn hơn thì phần còn lại im lặng. Chỉ có ảnh và nhạc: MP4 dài đúng bằng đoạn nhạc đã chọn
 
 ## Chạy
 
@@ -19,6 +22,8 @@ node server.mjs
 ```
 
 Mở [http://127.0.0.1:4173](http://127.0.0.1:4173).
+
+Phải mở trang qua server này; mở thẳng `index.html` từ ổ đĩa không chạy được vì code nằm trong các module `src/*.js`. Phông chữ tải từ Google Fonts nên cần mạng khi chỉnh sửa, mất mạng thì chữ dùng phông hệ thống.
 
 Dừng server bằng `Ctrl + C`.
 
